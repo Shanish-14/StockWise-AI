@@ -24,5 +24,3 @@ df.info()
 print("\nMissing values:")
 print(df.isnull().sum())
 
-#new files
-print("hello world")
