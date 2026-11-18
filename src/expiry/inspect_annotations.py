@@ -1,37 +1,36 @@
 
 
-import json
-from collections import Counter
 
-annotation_path = "data/raw/expiry/Products-Real/evaluation/annotations.json"
+
+
+import json
+
+annotation_path = "data/raw/expiry/Products-Real/train/annotations.json"
 
 with open(annotation_path, "r", encoding="utf-8") as file:
     data = json.load(file)
 
-class_counts = Counter()
-expiry_examples = []
+count = 0
 
 for image_name, image_data in data.items():
 
     for annotation in image_data["ann"]:
 
-        class_name = annotation["cls"]
-        class_counts[class_name] += 1
+        if annotation["cls"] in ["date", "due"]:
 
-        if class_name == "exp":
-            expiry_examples.append({
-                "image": image_name,
-                "date": annotation["transcription"]
-            })
+            print("Image:", image_name)
+            print("Class:", annotation["cls"])
+            print("Available fields:", list(annotation.keys()))
+            print("Text:", annotation.get("transcription", "Not available"))
+            print("Bounding box:", annotation.get("bbox", "Not available"))
+            print("-" * 50)
 
-print("========== ANNOTATION SUMMARY ==========")
+            count += 1
 
-print("\nClass counts:")
-for class_name, count in class_counts.items():
-    print(class_name, ":", count)
+            if count == 10:
+                break
 
-print("\nTotal expiry dates:", len(expiry_examples))
+    if count == 10:
+        break
 
-print("\nFirst 10 expiry examples:")
-for item in expiry_examples[:10]:
-    print(item["image"], ":", item["date"])
+print("\nInspection completed!")
