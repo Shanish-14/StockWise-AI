@@ -1,17 +1,34 @@
 
-
 import streamlit as st
+import pandas as pd
 import easyocr
 import re
-import pandas as pd
+import sys
+import math
+import numpy as np
 
-from datetime import datetime, date
-from dateutil import parser
+from pathlib import Path
+from datetime import date, datetime
+from PIL import Image
 
 
-# ==========================================
-# 1. PAGE CONFIGURATION
-# ==========================================
+# ==================================================
+# 1. PROJECT PATH AND DATABASE
+# ==================================================
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.expiry.database import (
+    add_product,
+    get_products,
+    delete_product
+)
+
+
+# ==================================================
+# 2. PAGE CONFIGURATION
+# ==================================================
 
 st.set_page_config(
     page_title="StockWise AI - Expiry Management",
@@ -19,241 +36,389 @@ st.set_page_config(
     layout="wide"
 )
 
+st.title("📦 StockWise AI")
+st.subheader("Intelligent Expiry Management System")
 
-# ==========================================
-# 2. SESSION STATE
-# ==========================================
 
-if "products" not in st.session_state:
-    st.session_state.products = []
+# ==================================================
+# 3. SESSION STATE
+# ==================================================
 
 if "ocr_candidates" not in st.session_state:
     st.session_state.ocr_candidates = []
 
+if "last_scan" not in st.session_state:
+    st.session_state.last_scan = None
+
 if "expiry_date_input" not in st.session_state:
     st.session_state.expiry_date_input = date.today()
 
-if "ocr_image_id" not in st.session_state:
-    st.session_state.ocr_image_id = None
 
-if "last_applied_scan" not in st.session_state:
-    st.session_state.last_applied_scan = None
+# ==================================================
+# 4. DATABASE FUNCTIONS
+# ==================================================
 
-
-# ==========================================
-# 3. OCR MODEL
-# ==========================================
-
-@st.cache_resource
-def load_ocr():
-    return easyocr.Reader(["en"], gpu=False)
+def load_inventory():
+    return get_products()
 
 
-# ==========================================
-# 4. DATE PARSING
-# ==========================================
+# ==================================================
+# 5. EXPIRY STATUS CLASSIFICATION
+# ==================================================
 
-def parse_product_date(text):
+def calculate_status(expiry_date):
 
-    text = text.strip()
+    expiry = datetime.strptime(
+        str(expiry_date),
+        "%Y-%m-%d"
+    ).date()
 
-    try:
-        return parser.parse(
-            text,
-            dayfirst=True,
-            fuzzy=False
-        ).date()
+    days_remaining = (
+        expiry - date.today()
+    ).days
 
-    except (ValueError, OverflowError):
-        return None
-
-
-# ==========================================
-# 5. DATE EXTRACTION
-# ==========================================
-
-def extract_dates(text):
-
-    patterns = [
-        r"\b\d{4}[./-]\d{1,2}[./-]\d{1,2}\b",
-        r"\b\d{2}[./-]\d{1,2}[./-]\d{1,2}\b",
-        r"\b\d{1,2}[./-]\d{1,2}[./-]\d{4}\b",
-        r"\b\d{1,2}[./-]\d{4}\b",
-        r"\b\d{4}[./-]\d{1,2}\b",
-        r"\b\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4}\b",
-        r"\b[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{2,4}\b"
-    ]
-
-    found_dates = []
-
-    for pattern in patterns:
-        found_dates.extend(re.findall(pattern, text))
-
-    unique_dates = []
-
-    for item in sorted(found_dates, key=len, reverse=True):
-        if not any(item in existing for existing in unique_dates):
-            unique_dates.append(item)
-
-    return unique_dates
-
-
-# ==========================================
-# 6. EXPIRY STATUS
-# ==========================================
-
-def calculate_expiry_status(expiry_date):
-
-    today = date.today()
-
-    remaining_days = (expiry_date - today).days
-
-    if remaining_days < 0:
+    if days_remaining < 0:
         status = "Expired"
 
-    elif remaining_days <= 7:
+    elif days_remaining <= 7:
         status = "Expiring Soon"
 
     else:
         status = "Safe"
 
-    return status, remaining_days
+    return days_remaining, status
 
 
-# ==========================================
-# 7. APPLICATION HEADER
-# ==========================================
+# ==================================================
+# 6. OCR READER
+# ==================================================
 
-st.title("📦 StockWise AI")
-st.subheader("Intelligent Expiry Management System")
+@st.cache_resource
+def load_ocr_reader():
 
-st.write(
-    "Scan product labels, register batches "
-    "and monitor expiry dates."
-)
-
-st.divider()
+    return easyocr.Reader(
+        ["en"],
+        gpu=False
+    )
 
 
-# ==========================================
-# 8. IMAGE UPLOAD AND OCR
-# ==========================================
+# ==================================================
+# 7. SMART EXPIRY DATE DETECTION
+# ==================================================
 
-st.header("📷 Scan Product Expiry Date")
+def extract_dates(ocr_results):
+
+    date_patterns = [
+        r"\b\d{4}[/-]\d{1,2}[/-]\d{1,2}\b",
+        r"\b\d{1,2}[/-]\d{1,2}[/-]\d{4}\b",
+        r"\b\d{1,2}\.\d{1,2}\.\d{4}\b"
+    ]
+
+    # Positive expiry keywords
+    expiry_keywords = [
+        "EXPIRY",
+        "EXPIRES",
+        "EXP",
+        "USE BY",
+        "BEST BEFORE",
+        "BBE"
+    ]
+
+    # Negative manufacturing keywords
+    manufacturing_keywords = [
+        "MFG",
+        "MFD",
+        "MANUFACTURED",
+        "MANUFACTURING",
+        "PACKED ON",
+        "PKD",
+        "PROD DATE",
+        "DATE OF MANUFACTURE"
+    ]
+
+    candidates = []
+
+    expiry_boxes = []
+
+    manufacturing_boxes = []
+
+    # ------------------------------------------------
+    # READ OCR TEXT AND KEYWORD LOCATIONS
+    # ------------------------------------------------
+
+    for result in ocr_results:
+
+        bbox, text, confidence = result
+
+        text_upper = text.upper()
+
+        center_x = sum(
+            point[0] for point in bbox
+        ) / 4
+
+        center_y = sum(
+            point[1] for point in bbox
+        ) / 4
+
+        position = (
+            center_x,
+            center_y
+        )
+
+        # Detect expiry keywords
+        for keyword in expiry_keywords:
+
+            pattern = (
+                r"(?<![A-Z])"
+                + re.escape(keyword)
+                + r"(?![A-Z])"
+            )
+
+            if re.search(pattern, text_upper):
+
+                expiry_boxes.append(position)
+
+                break
+
+        # Detect manufacturing keywords
+        for keyword in manufacturing_keywords:
+
+            pattern = (
+                r"(?<![A-Z])"
+                + re.escape(keyword)
+                + r"(?![A-Z])"
+            )
+
+            if re.search(pattern, text_upper):
+
+                manufacturing_boxes.append(position)
+
+                break
+
+        # ------------------------------------------------
+        # EXTRACT DATE CANDIDATES
+        # ------------------------------------------------
+
+        for pattern in date_patterns:
+
+            matches = re.findall(
+                pattern,
+                text
+            )
+
+            for item in matches:
+
+                parsed_date = None
+
+                formats = [
+                    "%Y-%m-%d",
+                    "%Y/%m/%d",
+                    "%d-%m-%Y",
+                    "%d/%m/%Y",
+                    "%d.%m.%Y"
+                ]
+
+                for fmt in formats:
+
+                    try:
+
+                        parsed_date = datetime.strptime(
+                            item,
+                            fmt
+                        ).date()
+
+                        break
+
+                    except ValueError:
+                        continue
+
+                if parsed_date:
+
+                    candidates.append({
+
+                        "date": parsed_date,
+
+                        "position": position,
+
+                        "confidence": float(confidence),
+
+                        "score": 0
+
+                    })
+
+    # ------------------------------------------------
+    # SCORE DATE CANDIDATES
+    # ------------------------------------------------
+
+    for candidate in candidates:
+
+        x1, y1 = candidate["position"]
+
+        # Positive scoring for expiry keywords
+        for x2, y2 in expiry_boxes:
+
+            distance = math.sqrt(
+                (x1 - x2) ** 2
+                + (y1 - y2) ** 2
+            )
+
+            if distance < 250:
+
+                candidate["score"] += 10
+
+            elif distance < 450:
+
+                candidate["score"] += 3
+
+        # Negative scoring for manufacturing keywords
+        for x2, y2 in manufacturing_boxes:
+
+            distance = math.sqrt(
+                (x1 - x2) ** 2
+                + (y1 - y2) ** 2
+            )
+
+            if distance < 250:
+
+                candidate["score"] -= 15
+
+            elif distance < 450:
+
+                candidate["score"] -= 5
+
+    # ------------------------------------------------
+    # REMOVE DUPLICATE DATES
+    # ------------------------------------------------
+
+    unique_candidates = {}
+
+    for candidate in candidates:
+
+        current_date = candidate["date"]
+
+        if (
+            current_date not in unique_candidates
+            or candidate["score"]
+            > unique_candidates[current_date]["score"]
+        ):
+
+            unique_candidates[current_date] = candidate
+
+    # ------------------------------------------------
+    # RANK DATE CANDIDATES
+    # ------------------------------------------------
+
+    ranked_candidates = sorted(
+        unique_candidates.values(),
+
+        key=lambda item: (
+            -item["score"],
+            -item["confidence"]
+        )
+    )
+
+    return ranked_candidates
+
+
+# ==================================================
+# 8. PRODUCT IMAGE SCANNING
+# ==================================================
+
+st.header("1. Scan Product Image")
 
 uploaded_file = st.file_uploader(
     "Upload a product image",
     type=["jpg", "jpeg", "png"]
 )
 
-if uploaded_file is not None:
+if uploaded_file:
 
-    st.image(
-        uploaded_file,
-        caption="Uploaded Product",
-        width=350
-    )
-
-    image_id = (
+    image_token = (
         uploaded_file.name,
         uploaded_file.size
     )
 
-    if st.session_state.ocr_image_id != image_id:
+    if st.session_state.last_scan != image_token:
 
-        st.session_state.ocr_image_id = image_id
-        st.session_state.ocr_candidates = []
-        st.session_state.last_applied_scan = None
+        with st.spinner("Analyzing product image..."):
 
-    if st.button("Read Expiry Date"):
+            reader = load_ocr_reader()
 
-        with st.spinner("Reading product image..."):
+            image = Image.open(
+                uploaded_file
+            ).convert("RGB")
 
-            reader = load_ocr()
+            image_array = np.array(image)
 
-            results = reader.readtext(
-                uploaded_file.getvalue()
+            ocr_results = reader.readtext(
+                image_array
             )
 
-            detected_text = [
-                result[1] for result in results
-            ]
-
-            full_text = " ".join(detected_text)
-
-            date_candidates = extract_dates(full_text)
-
-            parsed_candidates = []
-
-            for date_text in date_candidates:
-
-                parsed_date = parse_product_date(date_text)
-
-                if parsed_date:
-                    parsed_candidates.append(
-                        (date_text, parsed_date)
-                    )
-
-            st.session_state.ocr_candidates = parsed_candidates
-
-            st.session_state.last_applied_scan = None
-
-            st.session_state.pop(
-                "ocr_date_choice",
-                None
+            ranked_dates = extract_dates(
+                ocr_results
             )
 
-            st.session_state.last_ocr_text = detected_text
+            st.session_state.ocr_candidates = ranked_dates
 
-    if "last_ocr_text" in st.session_state:
+            st.session_state.last_scan = image_token
 
-        with st.expander("View OCR detected text"):
-            for text in st.session_state.last_ocr_text:
-                st.write("- ", text)
+    # ------------------------------------------------
+    # DISPLAY DETECTED DATES
+    # ------------------------------------------------
 
     if st.session_state.ocr_candidates:
 
-        st.subheader("Detected Date Candidates")
+        st.success(
+            "Date candidates detected successfully!"
+        )
+
+        st.write("Ranked date candidates:")
+
+        for index, candidate in enumerate(
+            st.session_state.ocr_candidates,
+            start=1
+        ):
+
+            st.write(
+                f"{index}. "
+                f"{candidate['date'].strftime('%Y-%m-%d')} "
+                f"| Score: {candidate['score']} "
+                f"| OCR confidence: "
+                f"{candidate['confidence']:.2f}"
+            )
 
         selected_date = st.selectbox(
             "Select the correct expiry date",
-            options=st.session_state.ocr_candidates,
-            format_func=lambda item: (
-                f"{item[0]} → {item[1]}"
-            ),
-            key="ocr_date_choice"
+
+            options=[
+                candidate["date"]
+                for candidate in st.session_state.ocr_candidates
+            ],
+
+            format_func=lambda x: x.strftime("%Y-%m-%d")
         )
 
-        scan_token = (
-            str(st.session_state.ocr_image_id)
-            + selected_date[0]
-        )
+        if st.button("Use selected OCR date"):
 
-        if st.session_state.last_applied_scan != scan_token:
+            st.session_state.expiry_date_input = selected_date
 
-            st.session_state.expiry_date_input = selected_date[1]
+            st.success(
+                "Date selected! Confirm it in the registration form."
+            )
 
-            st.session_state.last_applied_scan = scan_token
-
-        st.success(
-            "OCR date selected. Please verify it before saving."
-        )
-
-    elif "last_ocr_text" in st.session_state:
+    else:
 
         st.warning(
-            "No readable date found. You can enter the date manually."
+            "No valid date detected. "
+            "Please enter the expiry date manually."
         )
 
 
-st.divider()
-
-
-# ==========================================
+# ==================================================
 # 9. PRODUCT REGISTRATION
-# ==========================================
+# ==================================================
 
-st.header("➕ Add Product")
+st.header("2. Register Product")
 
 with st.form("product_form"):
 
@@ -268,12 +433,12 @@ with st.form("product_form"):
     quantity = st.number_input(
         "Quantity",
         min_value=1,
-        value=1,
         step=1
     )
 
     expiry_date = st.date_input(
         "Expiry Date",
+        value=st.session_state.expiry_date_input,
         key="expiry_date_input"
     )
 
@@ -283,121 +448,128 @@ with st.form("product_form"):
 
     if submitted:
 
-        if not product_name.strip():
+        if (
+            not product_name.strip()
+            or not batch_number.strip()
+        ):
 
-            st.error("Please enter a product name.")
+            st.error(
+                "Please enter product name and batch number."
+            )
 
         else:
 
-            status, remaining_days = calculate_expiry_status(
-                expiry_date
+            add_product(
+                product_name.strip(),
+                batch_number.strip(),
+                int(quantity),
+                expiry_date.strftime("%Y-%m-%d")
             )
 
-            product = {
-                "Product": product_name.strip(),
-                "Batch Number": batch_number.strip(),
-                "Quantity": quantity,
-                "Expiry Date": expiry_date,
-                "Days Remaining": remaining_days,
-                "Status": status
-            }
+            st.success(
+                "Product saved successfully!"
+            )
 
-            st.session_state.products.append(product)
-
-            st.success("Product saved successfully!")
+            st.rerun()
 
 
-st.divider()
-
-
-# ==========================================
+# ==================================================
 # 10. INVENTORY DASHBOARD
-# ==========================================
+# ==================================================
 
-st.header("📊 Inventory Dashboard")
+st.header("3. Inventory Dashboard")
 
-products_df = pd.DataFrame(
-    st.session_state.products
-)
+products = load_inventory()
 
-if not products_df.empty:
+if products:
 
-    # Recalculate status using today's date
-    statuses = products_df["Expiry Date"].apply(
-        calculate_expiry_status
-    )
+    inventory = []
 
-    products_df["Status"] = [
-        item[0] for item in statuses
-    ]
+    for product in products:
 
-    products_df["Days Remaining"] = [
-        item[1] for item in statuses
-    ]
+        days, status = calculate_status(
+            product["expiry_date"]
+        )
+
+        inventory.append({
+
+            "ID": product["id"],
+
+            "Product": product["product_name"],
+
+            "Batch Number": product["batch_number"],
+
+            "Quantity": product["quantity"],
+
+            "Expiry Date": product["expiry_date"],
+
+            "Days Remaining": days,
+
+            "Status": status
+
+        })
+
+    df = pd.DataFrame(inventory)
+
+    # ------------------------------------------------
+    # SUMMARY METRICS
+    # ------------------------------------------------
 
     expired_count = (
-        products_df["Status"] == "Expired"
+        df["Status"] == "Expired"
     ).sum()
 
     expiring_count = (
-        products_df["Status"] == "Expiring Soon"
+        df["Status"] == "Expiring Soon"
     ).sum()
 
     safe_count = (
-        products_df["Status"] == "Safe"
+        df["Status"] == "Safe"
     ).sum()
 
-else:
+    col1, col2, col3 = st.columns(3)
 
-    expired_count = 0
-    expiring_count = 0
-    safe_count = 0
+    col1.metric(
+        "Expired Products",
+        int(expired_count)
+    )
 
+    col2.metric(
+        "Expiring Soon",
+        int(expiring_count)
+    )
 
-col1, col2, col3 = st.columns(3)
+    col3.metric(
+        "Safe Products",
+        int(safe_count)
+    )
 
-col1.metric("Expired Products", expired_count)
-col2.metric("Expiring Soon", expiring_count)
-col3.metric("Safe Products", safe_count)
+    # ------------------------------------------------
+    # PRODUCT INVENTORY
+    # ------------------------------------------------
 
-
-# ==========================================
-# 11. PRODUCT INVENTORY
-# ==========================================
-
-st.header("📋 Product Inventory")
-
-if not products_df.empty:
+    st.subheader("Product Inventory")
 
     st.dataframe(
-        products_df,
+        df.drop(columns=["ID"]),
         use_container_width=True,
         hide_index=True
     )
 
-else:
+    # ------------------------------------------------
+    # EXPIRY ALERTS
+    # ------------------------------------------------
 
-    st.info("No products added yet.")
+    st.subheader("4. Expiry Alerts")
 
-
-# ==========================================
-# 12. EXPIRY ALERTS
-# ==========================================
-
-st.header("⚠️ Expiry Alerts")
-
-if not products_df.empty:
-
-    alerts = products_df[
-        products_df["Status"].isin(
-            ["Expired", "Expiring Soon"]
-        )
+    alerts = df[
+        df["Status"] != "Safe"
     ]
 
     if not alerts.empty:
 
         st.dataframe(
-            alerts,
+            alerts.drop(columns=["ID"]),
             use_container_width=True,
             hide_index=True
         )
@@ -405,16 +577,57 @@ if not products_df.empty:
     else:
 
         st.success(
-            "No expiry alerts. All recorded products are safe."
+            "No expiry alerts!"
         )
+
+    # ------------------------------------------------
+    # DELETE PRODUCT
+    # ------------------------------------------------
+
+    st.subheader("5. Delete Product")
+
+    product_options = {
+
+        f'{p["product_name"]} - '
+        f'{p["batch_number"]} '
+        f'(ID: {p["id"]})': p["id"]
+
+        for p in products
+
+    }
+
+    selected_product = st.selectbox(
+        "Select product to delete",
+        options=list(product_options.keys())
+    )
+
+    if st.button("Delete Selected Product"):
+
+        delete_product(
+            product_options[selected_product]
+        )
+
+        st.success(
+            "Product deleted successfully!"
+        )
+
+        st.rerun()
 
 else:
 
-    st.info("Add products to generate expiry alerts.")
+    st.info(
+        "No products registered yet. "
+        "Add your first product above."
+    )
 
+
+# ==================================================
+# 11. FOOTER
+# ==================================================
 
 st.divider()
 
 st.caption(
-    "StockWise AI | Expiry Management Prototype"
+    "StockWise AI | Intelligent Grocery Inventory Management"
 )
+
