@@ -1,224 +1,259 @@
 
 
-import easyocr
+
 import re
-import os
-from datetime import datetime
-from dateutil import parser
+import argparse
+from pathlib import Path
+from datetime import datetime, date
+
+import easyocr
 
 
-# ==========================================
-# 1. DATE PARSING FUNCTION
-# ==========================================
+# --------------------------------------------------
+# 1. DATE PATTERNS
+# --------------------------------------------------
 
-def parse_product_date(text):
+DATE_PATTERNS = [
+    r"\b\d{4}[./-]\d{1,2}[./-]\d{1,2}\b",
+    r"\b\d{1,2}[./-]\d{1,2}[./-]\d{4}\b",
+    r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2}\b",
+    r"\b\d{1,2}[./-]\d{4}\b",
+    r"\b\d{4}[./-]\d{1,2}\b",
+]
 
-    text = text.strip()
-
-    # YYYY.MM.DD
-    if re.fullmatch(r"\d{4}[./-]\d{1,2}[./-]\d{1,2}", text):
-        for fmt in ("%Y.%m.%d", "%Y/%m/%d", "%Y-%m-%d"):
-            try:
-                return datetime.strptime(text, fmt)
-            except ValueError:
-                continue
-
-    # YY.MM.DD
-    if re.fullmatch(r"\d{2}[./-]\d{1,2}[./-]\d{1,2}", text):
-        for fmt in ("%y.%m.%d", "%y/%m/%d", "%y-%m-%d"):
-            try:
-                return datetime.strptime(text, fmt)
-            except ValueError:
-                continue
-
-    # DD.MM.YYYY
-    if re.fullmatch(r"\d{1,2}[./-]\d{1,2}[./-]\d{4}", text):
-        for fmt in ("%d.%m.%Y", "%d/%m/%Y", "%d-%m-%Y"):
-            try:
-                return datetime.strptime(text, fmt)
-            except ValueError:
-                continue
-
-    # MM.YYYY
-    if re.fullmatch(r"\d{1,2}[./-]\d{4}", text):
-        for fmt in ("%m.%Y", "%m/%Y", "%m-%Y"):
-            try:
-                return datetime.strptime(text, fmt)
-            except ValueError:
-                continue
-
-    # YYYY.MM
-    if re.fullmatch(r"\d{4}[./-]\d{1,2}", text):
-        for fmt in ("%Y.%m", "%Y/%m", "%Y-%m"):
-            try:
-                return datetime.strptime(text, fmt)
-            except ValueError:
-                continue
-
-    # Dates containing month names
-    try:
-        return parser.parse(text, dayfirst=True, fuzzy=False)
-    except (ValueError, OverflowError):
-        return None
+DATE_FORMATS = [
+    "%Y-%m-%d",
+    "%Y/%m/%d",
+    "%Y.%m.%d",
+    "%d-%m-%Y",
+    "%d/%m/%Y",
+    "%d.%m.%Y",
+    "%d-%m-%y",
+    "%d/%m/%y",
+    "%d.%m.%y",
+    "%m-%Y",
+    "%m/%Y",
+    "%m.%Y",
+    "%Y-%m",
+    "%Y/%m",
+    "%Y.%m",
+]
 
 
-# ==========================================
-# 2. EXTRACT DATES FROM OCR TEXT
-# ==========================================
+# --------------------------------------------------
+# 2. PARSE PRODUCT DATE
+# --------------------------------------------------
 
-def extract_dates(text):
+def parse_product_date(date_text):
 
-    patterns = [
-        r"\b\d{4}[./-]\d{1,2}[./-]\d{1,2}\b",
-        r"\b\d{2}[./-]\d{1,2}[./-]\d{1,2}\b",
-        r"\b\d{1,2}[./-]\d{1,2}[./-]\d{4}\b",
-        r"\b\d{1,2}[./-]\d{4}\b",
-        r"\b\d{4}[./-]\d{1,2}\b",
-        r"\b\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4}\b",
-        r"\b[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{2,4}\b",
-        r"\b[A-Za-z]{3,9}/\d{1,2}/\d{2,4}\b"
-    ]
+    date_text = date_text.strip()
+
+    for fmt in DATE_FORMATS:
+        try:
+            return datetime.strptime(
+                date_text,
+                fmt
+            ).date()
+
+        except ValueError:
+            continue
+
+    return None
+
+
+# --------------------------------------------------
+# 3. EXTRACT DATES FROM OCR TEXT
+# --------------------------------------------------
+
+def extract_dates(ocr_results):
 
     found_dates = []
 
-    for pattern in patterns:
-        matches = re.findall(pattern, text)
-        found_dates.extend(matches)
+    for result in ocr_results:
 
-    # Remove shorter dates contained inside longer dates
+        text = result[1]
+
+        for pattern in DATE_PATTERNS:
+
+            matches = re.findall(
+                pattern,
+                text
+            )
+
+            found_dates.extend(matches)
+
+    # Remove duplicate matches
+    found_dates = list(set(found_dates))
+
+    # IMPORTANT:
+    # Keep longer dates before shorter dates.
+    # Example:
+    # 2025/01/28 is kept.
+    # 2025/01 is removed because it is part
+    # of the complete date.
+
+    sorted_dates = sorted(
+        found_dates,
+        key=len,
+        reverse=True
+    )
+
     unique_dates = []
 
-    for date in sorted(found_dates, key=len, reverse=True):
+    for current_date in sorted_dates:
 
-        if not any(date in existing for existing in unique_dates):
-            unique_dates.append(date)
+        if not any(
+            current_date in existing
+            for existing in unique_dates
+        ):
+
+            unique_dates.append(current_date)
 
     return unique_dates
 
 
-# ==========================================
-# 3. SELECT PRODUCT IMAGE
-# ==========================================
+# --------------------------------------------------
+# 4. CHECK EXPIRY STATUS
+# --------------------------------------------------
 
-image_name = "img_00001.jpg"
+def check_expiry_status(expiry_date):
 
-image_path = os.path.join(
-    "data/raw/expiry/Products-Real/train/images",
-    image_name
-)
+    today = date.today()
 
-if not os.path.exists(image_path):
-    print("Image not found:", image_path)
-    raise SystemExit
+    remaining_days = (
+        expiry_date - today
+    ).days
 
+    if remaining_days < 0:
 
-# ==========================================
-# 4. LOAD EASYOCR
-# ==========================================
+        status = "EXPIRED"
 
-print("Loading EasyOCR model...")
+    elif remaining_days <= 30:
 
-reader = easyocr.Reader(["en"], gpu=False)
-
-
-# ==========================================
-# 5. READ PRODUCT IMAGE
-# ==========================================
-
-print("\nProcessing image:", image_name)
-
-results = reader.readtext(image_path)
-
-detected_text = []
-
-for result in results:
-    detected_text.append(result[1])
-
-full_text = " ".join(detected_text)
-
-print("\n========== OCR DETECTED TEXT ==========")
-
-for text in detected_text:
-    print(text)
-
-
-# ==========================================
-# 6. CHECK EXPIRY-RELATED KEYWORDS
-# ==========================================
-
-expiry_keywords = [
-    "best before",
-    "expiry",
-    "expires",
-    "expiration",
-    "use by",
-    "exp date"
-]
-
-lower_text = full_text.lower()
-
-expiry_context_found = any(
-    keyword in lower_text
-    for keyword in expiry_keywords
-)
-
-
-# ==========================================
-# 7. EXTRACT AND PARSE DATES
-# ==========================================
-
-date_candidates = extract_dates(full_text)
-
-print("\n========== DATE DETECTION ==========")
-
-today = datetime.now().date()
-
-if not date_candidates:
-    print("No dates detected.")
-
-for date_text in date_candidates:
-
-    parsed_date = parse_product_date(date_text)
-
-    print("\nDetected text:", date_text)
-
-    if parsed_date is None:
-        print("Could not understand this date.")
-        continue
-
-    print(
-        "Standard date:",
-        parsed_date.strftime("%Y-%m-%d")
-    )
-
-    # Check if date contains only month and year
-    month_only = (
-        re.fullmatch(r"\d{1,2}[./-]\d{4}", date_text)
-        or re.fullmatch(r"\d{4}[./-]\d{1,2}", date_text)
-    )
-
-    if month_only:
-        print("Status: Month/year only - exact day unknown")
-
-    elif not expiry_context_found:
-        print("Status: Date found, but expiry is not confirmed")
-
-    elif parsed_date.date() < today:
-        print("Status: EXPIRED")
+        status = "EXPIRING SOON"
 
     else:
-        print("Status: NOT EXPIRED")
+
+        status = "SAFE"
+
+    return status, remaining_days
 
 
-# ==========================================
-# 8. FINAL RESULT
-# ==========================================
+# --------------------------------------------------
+# 5. MAIN OCR DETECTOR
+# --------------------------------------------------
 
-print("\n========== FINAL RESULT ==========")
+def detect_expiry_date(image_path):
 
-if expiry_context_found:
-    print("Expiry-related text found in the image.")
-else:
-    print("No clear expiry-related keyword found.")
+    image_path = Path(image_path)
 
-print("\nAutomatic expiry detection test completed!")
+    if not image_path.exists():
+
+        print("ERROR: Image not found.")
+        print(image_path)
+
+        return
+
+    print("\nLoading EasyOCR model...")
+
+    reader = easyocr.Reader(
+        ["en"],
+        gpu=False
+    )
+
+    print("Reading image...")
+
+    ocr_results = reader.readtext(
+        str(image_path)
+    )
+
+    print("\nRAW OCR TEXT")
+
+    for result in ocr_results:
+
+        print(
+            result[1],
+            "| Confidence:",
+            round(result[2], 3)
+        )
+
+    # Extract dates
+    detected_dates = extract_dates(
+        ocr_results
+    )
+
+    print("\nDETECTED DATES")
+
+    if not detected_dates:
+
+        print("No date detected.")
+        return
+
+    valid_dates = []
+
+    for detected_date in detected_dates:
+
+        parsed_date = parse_product_date(
+            detected_date
+        )
+
+        if parsed_date is not None:
+
+            valid_dates.append(
+                (detected_date, parsed_date)
+            )
+
+    if not valid_dates:
+
+        print("No valid date found.")
+        return
+
+    for original_date, parsed_date in valid_dates:
+
+        status, remaining_days = check_expiry_status(
+            parsed_date
+        )
+
+        print("\n------------------------------")
+
+        print(
+            "Detected date:",
+            original_date
+        )
+
+        print(
+            "Standard date:",
+            parsed_date.strftime("%Y-%m-%d")
+        )
+
+        print(
+            "Expiry status:",
+            status
+        )
+
+        print(
+            "Days remaining:",
+            remaining_days
+        )
+
+        print("------------------------------")
+
+
+# --------------------------------------------------
+# 6. RUN PROGRAM
+# --------------------------------------------------
+
+if __name__ == "__main__":
+
+    parser = argparse.ArgumentParser(
+        description="Automatic expiry date detector"
+    )
+
+    parser.add_argument(
+        "image",
+        help="Path to product image"
+    )
+
+    args = parser.parse_args()
+
+    detect_expiry_date(args.image)

@@ -1,4 +1,5 @@
 
+
 import streamlit as st
 import pandas as pd
 import easyocr
@@ -108,13 +109,13 @@ def load_ocr_reader():
 
 def extract_dates(ocr_results):
 
+    # Supported date formats
     date_patterns = [
-        r"\b\d{4}[/-]\d{1,2}[/-]\d{1,2}\b",
-        r"\b\d{1,2}[/-]\d{1,2}[/-]\d{4}\b",
-        r"\b\d{1,2}\.\d{1,2}\.\d{4}\b"
+        r"\b\d{4}[./-]\d{1,2}[./-]\d{1,2}\b",
+        r"\b\d{1,2}[./-]\d{1,2}[./-]\d{4}\b"
     ]
 
-    # Positive expiry keywords
+    # Expiry keywords
     expiry_keywords = [
         "EXPIRY",
         "EXPIRES",
@@ -124,7 +125,7 @@ def extract_dates(ocr_results):
         "BBE"
     ]
 
-    # Negative manufacturing keywords
+    # Manufacturing keywords
     manufacturing_keywords = [
         "MFG",
         "MFD",
@@ -141,6 +142,16 @@ def extract_dates(ocr_results):
     expiry_boxes = []
 
     manufacturing_boxes = []
+
+    # Supported Python date formats
+    formats = [
+        "%Y-%m-%d",
+        "%Y/%m/%d",
+        "%Y.%m.%d",
+        "%d-%m-%Y",
+        "%d/%m/%Y",
+        "%d.%m.%Y"
+    ]
 
     # ------------------------------------------------
     # READ OCR TEXT AND KEYWORD LOCATIONS
@@ -209,14 +220,6 @@ def extract_dates(ocr_results):
             for item in matches:
 
                 parsed_date = None
-
-                formats = [
-                    "%Y-%m-%d",
-                    "%Y/%m/%d",
-                    "%d-%m-%Y",
-                    "%d/%m/%Y",
-                    "%d.%m.%Y"
-                ]
 
                 for fmt in formats:
 
@@ -630,4 +633,3 @@ st.divider()
 st.caption(
     "StockWise AI | Intelligent Grocery Inventory Management"
 )
-
