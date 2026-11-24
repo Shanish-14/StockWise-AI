@@ -1,8 +1,5 @@
 
 
-
-
-
 import streamlit as st
 import pandas as pd
 import easyocr
@@ -10,9 +7,10 @@ import re
 import sys
 import math
 import numpy as np
+import joblib
 
 from pathlib import Path
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from PIL import Image
 
 
@@ -1003,8 +1001,6 @@ if WHAT_IF_INVENTORY_PATH.exists():
             f"Target coverage: {target_cover_days} days"
         )
 
-        # Calculate scenario
-
         what_if_results = calculate_what_if_scenario(
             what_if_source,
             demand_change,
@@ -1014,8 +1010,6 @@ if WHAT_IF_INVENTORY_PATH.exists():
         what_if_transfers = generate_what_if_transfers(
             what_if_results
         )
-
-        # Summary metrics
 
         shortage_count = int(
             (
@@ -1099,8 +1093,6 @@ if WHAT_IF_INVENTORY_PATH.exists():
             transfer_count
         )
 
-        # Transfer recommendations
-
         st.subheader("Scenario Transfer Recommendations")
 
         if not what_if_transfers.empty:
@@ -1129,8 +1121,6 @@ if WHAT_IF_INVENTORY_PATH.exists():
                 "No transfer recommendations were generated "
                 "for this scenario."
             )
-
-        # Inventory scenario details
 
         st.subheader("Store-Product Scenario Details")
 
@@ -1183,8 +1173,6 @@ if WHAT_IF_INVENTORY_PATH.exists():
             mime="text/csv",
             key="what_if_inventory_download"
         )
-
-        # Scenario summary
 
         st.subheader("Scenario Summary")
 
@@ -1239,7 +1227,1056 @@ else:
 
 
 # ==================================================
-# 15. FOOTER
+# 15. DEMAND FORECASTING - DATA LOADING
+# ==================================================
+
+FORECAST_DATA_PATH = (
+    PROJECT_ROOT
+    / "data"
+    / "processed"
+    / "forecasting_features.parquet"
+)
+
+FORECAST_MODEL_PATH = (
+    PROJECT_ROOT
+    / "models"
+    / "demand_forecasting_model.pkl"
+)
+
+FORECAST_FEATURES = [
+    "store_id",
+    "product_id",
+    "day_of_week",
+    "month",
+    "is_weekend",
+    "holiday_flag",
+    "discount",
+    "lag_1",
+    "lag_7",
+    "lag_14",
+    "rolling_mean_7"
+]
+
+
+@st.cache_resource
+def load_demand_model():
+
+    model_package = joblib.load(
+        FORECAST_MODEL_PATH
+    )
+
+    model = model_package["model"]
+    features = model_package["features"]
+
+    if features != FORECAST_FEATURES:
+        raise ValueError(
+            "The saved model feature list does not match "
+            "the expected forecasting features."
+        )
+
+    return model
+
+
+@st.cache_data(show_spinner="Loading recent demand history...")
+def load_forecasting_history():
+
+    if not FORECAST_DATA_PATH.exists():
+        raise FileNotFoundError(
+            f"Forecasting dataset not found: {FORECAST_DATA_PATH}"
+        )
+
+    date_data = pd.read_parquet(
+        FORECAST_DATA_PATH,
+        columns=["dt"]
+    )
+
+    date_data["dt"] = pd.to_datetime(
+        date_data["dt"]
+    )
+
+    latest_date = date_data["dt"].max()
+
+    del date_data
+
+    history_start = (
+        latest_date - pd.Timedelta(days=13)
+    )
+
+    required_columns = [
+        "store_id",
+        "product_id",
+        "dt",
+        "demand",
+        "holiday_flag",
+        "discount"
+    ]
+
+    history = pd.read_parquet(
+        FORECAST_DATA_PATH,
+        columns=required_columns,
+        filters=[
+            ("dt", ">=", history_start),
+            ("dt", "<=", latest_date)
+        ]
+    )
+
+    history["dt"] = pd.to_datetime(
+        history["dt"]
+    )
+
+    history = history[
+        history["dt"].between(
+            history_start,
+            latest_date
+        )
+    ].copy()
+
+    return history, latest_date
+
+
+# ==================================================
+# 16. PREPARE NEXT-DAY FORECAST FEATURES
+# ==================================================
+
+def prepare_next_day_features(
+    history,
+    latest_date
+):
+
+    forecast_date = (
+        latest_date + pd.Timedelta(days=1)
+    )
+
+    keys = [
+        "store_id",
+        "product_id"
+    ]
+
+    latest_records = history[
+        history["dt"] == latest_date
+    ].copy()
+
+    if latest_records.empty:
+        raise ValueError(
+            "No records found for the latest date."
+        )
+
+    demand_history = history.pivot_table(
+        index=keys,
+        columns="dt",
+        values="demand",
+        aggfunc="first"
+    )
+
+    date_lag_1 = latest_date
+
+    date_lag_7 = (
+        forecast_date - pd.Timedelta(days=7)
+    )
+
+    date_lag_14 = (
+        forecast_date - pd.Timedelta(days=14)
+    )
+
+    rolling_dates = [
+        latest_date - pd.Timedelta(days=offset)
+        for offset in range(6, -1, -1)
+    ]
+
+    required_dates = [
+        date_lag_1,
+        date_lag_7,
+        date_lag_14
+    ]
+
+    missing_dates = [
+        current_date
+        for current_date in required_dates
+        if current_date not in demand_history.columns
+    ]
+
+    if missing_dates:
+        raise ValueError(
+            "Historical data is missing one or more required "
+            "dates for forecasting."
+        )
+
+    forecast_inputs = latest_records[
+        keys + [
+            "holiday_flag",
+            "discount"
+        ]
+    ].copy()
+
+    forecast_inputs["lag_1"] = (
+        forecast_inputs.set_index(keys)
+        .index.map(
+            demand_history[date_lag_1]
+        )
+    )
+
+    forecast_inputs["lag_7"] = (
+        forecast_inputs.set_index(keys)
+        .index.map(
+            demand_history[date_lag_7]
+        )
+    )
+
+    forecast_inputs["lag_14"] = (
+        forecast_inputs.set_index(keys)
+        .index.map(
+            demand_history[date_lag_14]
+        )
+    )
+
+    missing_rolling_dates = [
+        current_date
+        for current_date in rolling_dates
+        if current_date not in demand_history.columns
+    ]
+
+    if missing_rolling_dates:
+        raise ValueError(
+            "Historical data is missing dates needed for "
+            "the seven-day rolling average."
+        )
+
+    forecast_inputs["rolling_mean_7"] = (
+        forecast_inputs.set_index(keys)
+        .index.map(
+            demand_history[rolling_dates].mean(axis=1)
+        )
+    )
+
+    forecast_inputs["day_of_week"] = (
+        forecast_date.dayofweek
+    )
+
+    forecast_inputs["month"] = (
+        forecast_date.month
+    )
+
+    forecast_inputs["is_weekend"] = int(
+        forecast_date.dayofweek >= 5
+    )
+
+    forecast_inputs["forecast_date"] = forecast_date
+
+    forecast_inputs = forecast_inputs.dropna(
+        subset=FORECAST_FEATURES
+    )
+
+    return forecast_inputs, forecast_date
+
+
+# ==================================================
+# 17. DEMAND FORECASTING DASHBOARD
+# ==================================================
+
+st.header("8. Demand Forecasting")
+
+st.write(
+    "Predict next-day product demand for a selected store "
+    "using the trained Random Forest model and historical sales data."
+)
+
+if (
+    FORECAST_DATA_PATH.exists()
+    and FORECAST_MODEL_PATH.exists()
+):
+
+    try:
+
+        forecast_history, latest_forecast_date = (
+            load_forecasting_history()
+        )
+
+        forecast_inputs, forecast_date = (
+            prepare_next_day_features(
+                forecast_history,
+                latest_forecast_date
+            )
+        )
+
+        if forecast_inputs.empty:
+
+            st.warning(
+                "No valid store-product forecasting records "
+                "could be prepared."
+            )
+
+        else:
+
+            st.info(
+                f"Historical data available through: "
+                f"{latest_forecast_date.strftime('%d %B %Y')} "
+                f"| Forecast date: "
+                f"{forecast_date.strftime('%d %B %Y')}"
+            )
+
+            st.warning(
+                "The model predicts normalized demand values from "
+                "the source dataset, not verified physical stock units. "
+                "The next-day discount and holiday inputs use the "
+                "latest observed values as assumptions."
+            )
+
+            st.subheader("Select Store and Product")
+
+            forecast_col1, forecast_col2 = st.columns(2)
+
+            available_stores = sorted(
+                forecast_inputs["store_id"].unique().tolist()
+            )
+
+            with forecast_col1:
+
+                selected_store = st.selectbox(
+                    "Select Store",
+                    options=available_stores,
+                    key="forecast_store"
+                )
+
+            store_forecast_options = forecast_inputs[
+                forecast_inputs["store_id"] == selected_store
+            ].copy()
+
+            available_products = sorted(
+                store_forecast_options[
+                    "product_id"
+                ].unique().tolist()
+            )
+
+            with forecast_col2:
+
+                selected_product = st.selectbox(
+                    "Select Product",
+                    options=available_products,
+                    key="forecast_product"
+                )
+
+            selected_forecast = forecast_inputs[
+                (
+                    forecast_inputs["store_id"]
+                    == selected_store
+                )
+                &
+                (
+                    forecast_inputs["product_id"]
+                    == selected_product
+                )
+            ].copy()
+
+            if not selected_forecast.empty:
+
+                model = load_demand_model()
+
+                X_forecast = selected_forecast[
+                    FORECAST_FEATURES
+                ]
+
+                predicted_demand = float(
+                    model.predict(X_forecast)[0]
+                )
+
+                actual_latest_demand = float(
+                    selected_forecast["lag_1"].iloc[0]
+                )
+
+                rolling_average = float(
+                    selected_forecast[
+                        "rolling_mean_7"
+                    ].iloc[0]
+                )
+
+                st.subheader("Forecast Result")
+
+                result_col1, result_col2, result_col3 = (
+                    st.columns(3)
+                )
+
+                result_col1.metric(
+                    "Predicted Next-Day Demand",
+                    f"{predicted_demand:.3f}"
+                )
+
+                result_col2.metric(
+                    "Latest Actual Demand",
+                    f"{actual_latest_demand:.3f}"
+                )
+
+                result_col3.metric(
+                    "Previous 7-Day Average",
+                    f"{rolling_average:.3f}"
+                )
+
+                st.caption(
+                    f"Store: {selected_store} | "
+                    f"Product: {selected_product} | "
+                    f"Forecast date: "
+                    f"{forecast_date.strftime('%Y-%m-%d')}"
+                )
+
+                st.subheader("Recent Demand History")
+
+                product_history = forecast_history[
+                    (
+                        forecast_history["store_id"]
+                        == selected_store
+                    )
+                    &
+                    (
+                        forecast_history["product_id"]
+                        == selected_product
+                    )
+                ].sort_values("dt").copy()
+
+                chart_history = product_history[
+                    ["dt", "demand"]
+                ].rename(
+                    columns={
+                        "demand": "Actual Demand"
+                    }
+                )
+
+                predicted_row = pd.DataFrame({
+                    "dt": [forecast_date],
+                    "Actual Demand": [np.nan],
+                    "Predicted Demand": [predicted_demand]
+                })
+
+                chart_history["Predicted Demand"] = np.nan
+
+                chart_data = pd.concat(
+                    [
+                        chart_history,
+                        predicted_row
+                    ],
+                    ignore_index=True
+                )
+
+                chart_data = chart_data.set_index("dt")
+
+                st.line_chart(
+                    chart_data,
+                    use_container_width=True
+                )
+
+                with st.expander(
+                    "View the 11 model input features"
+                ):
+
+                    input_display = selected_forecast[
+                        FORECAST_FEATURES
+                    ].copy()
+
+                    st.dataframe(
+                        input_display,
+                        use_container_width=True,
+                        hide_index=True
+                    )
+
+                forecast_download = pd.DataFrame([{
+                    "store_id": selected_store,
+                    "product_id": selected_product,
+                    "forecast_date": forecast_date.strftime(
+                        "%Y-%m-%d"
+                    ),
+                    "predicted_demand": predicted_demand,
+                    "latest_actual_demand": actual_latest_demand,
+                    "previous_7_day_average": rolling_average,
+                    "holiday_flag_assumption":
+                        int(selected_forecast["holiday_flag"].iloc[0]),
+                    "discount_assumption":
+                        float(selected_forecast["discount"].iloc[0])
+                }])
+
+                st.download_button(
+                    label="Download Demand Forecast",
+                    data=forecast_download.to_csv(index=False),
+                    file_name="stockwise_demand_forecast.csv",
+                    mime="text/csv",
+                    key="demand_forecast_download"
+                )
+
+                st.success(
+                    "Next-day demand prediction generated successfully!"
+                )
+
+    except Exception as error:
+
+        st.error(
+            f"Unable to generate demand forecast: {error}"
+        )
+
+else:
+
+    st.warning(
+        "Demand forecasting files are missing. "
+        "Please check that these files exist: "
+        "data/processed/forecasting_features.parquet and "
+        "models/demand_forecasting_model.pkl"
+    )
+
+
+# ==================================================
+# 18. SUPPLIER DELAY PREDICTION - DATA AND MODEL
+# ==================================================
+
+SUPPLIER_DELAY_DATA_PATH = (
+    PROJECT_ROOT
+    / "data"
+    / "raw"
+    / "supplier_delay"
+    / "v3"
+    / "grocery_supplier_orders_v3.csv"
+)
+
+SUPPLIER_DELAY_MODEL_PATH = (
+    PROJECT_ROOT
+    / "models"
+    / "supplier_delay"
+    / "v3"
+    / "supplier_delay_v3_candidate.joblib"
+)
+
+SUPPLIER_DELAY_CATEGORICAL_FEATURES = [
+    "supplier_id",
+    "store_id",
+    "product_id",
+    "product_category"
+]
+
+SUPPLIER_DELAY_NUMERIC_FEATURES = [
+    "order_quantity",
+    "distance_km",
+    "supplier_reliability",
+    "capacity_utilization",
+    "promised_delivery_days",
+    "order_day_of_week",
+    "order_month",
+    "is_festival_period",
+    "transport_risk"
+]
+
+SUPPLIER_DELAY_FEATURES = (
+    SUPPLIER_DELAY_CATEGORICAL_FEATURES
+    + SUPPLIER_DELAY_NUMERIC_FEATURES
+)
+
+
+@st.cache_resource
+def load_supplier_delay_model():
+
+    if not SUPPLIER_DELAY_MODEL_PATH.exists():
+        raise FileNotFoundError(
+            f"Supplier delay model not found: "
+            f"{SUPPLIER_DELAY_MODEL_PATH}"
+        )
+
+    return joblib.load(
+        SUPPLIER_DELAY_MODEL_PATH
+    )
+
+
+@st.cache_data(show_spinner="Loading supplier order data...")
+def load_supplier_delay_reference_data():
+
+    if not SUPPLIER_DELAY_DATA_PATH.exists():
+        raise FileNotFoundError(
+            f"Supplier delay dataset not found: "
+            f"{SUPPLIER_DELAY_DATA_PATH}"
+        )
+
+    required_columns = (
+        SUPPLIER_DELAY_FEATURES
+        + ["is_delayed"]
+    )
+
+    reference_data = pd.read_csv(
+        SUPPLIER_DELAY_DATA_PATH,
+        usecols=required_columns
+    )
+
+    if reference_data.empty:
+        raise ValueError("Supplier dataset is empty.")
+
+    return reference_data
+
+
+# ==================================================
+# 19. SUPPLIER DELAY PREDICTION DASHBOARD
+# ==================================================
+
+st.header("9. Supplier Delay Prediction")
+
+st.write(
+    "Estimate the probability of a grocery supplier order "
+    "being delayed using the experimental Random Forest model."
+)
+
+if (
+    SUPPLIER_DELAY_DATA_PATH.exists()
+    and SUPPLIER_DELAY_MODEL_PATH.exists()
+):
+
+    try:
+
+        supplier_reference = (
+            load_supplier_delay_reference_data()
+        )
+
+        supplier_model = load_supplier_delay_model()
+
+        st.warning(
+            "Experimental feature: This model was trained using "
+            "50,000 synthetically generated grocery supplier orders, "
+            "not real supermarket delivery records. Its final test "
+            "accuracy was 47.83%. Predictions should not be used "
+            "for actual purchasing or supplier decisions."
+        )
+
+        st.subheader("Enter Supplier Order Details")
+
+        # ------------------------------------------
+        # Supplier and product selection
+        # ------------------------------------------
+
+        supplier_col1, supplier_col2 = st.columns(2)
+
+        available_suppliers = sorted(
+            supplier_reference["supplier_id"]
+            .dropna()
+            .unique()
+            .tolist()
+        )
+
+        available_stores = sorted(
+            supplier_reference["store_id"]
+            .dropna()
+            .unique()
+            .tolist()
+        )
+
+        available_products = sorted(
+            supplier_reference["product_id"]
+            .dropna()
+            .unique()
+            .tolist()
+        )
+
+        available_categories = sorted(
+            supplier_reference["product_category"]
+            .dropna()
+            .unique()
+            .tolist()
+        )
+
+        if not all([
+            available_suppliers,
+            available_stores,
+            available_products,
+            available_categories
+        ]):
+            raise ValueError(
+                "One or more supplier dataset selection lists are empty."
+            )
+
+        with supplier_col1:
+
+            selected_supplier = st.selectbox(
+                "Select Supplier",
+                options=available_suppliers,
+                key="delay_supplier"
+            )
+
+            selected_store = st.selectbox(
+                "Select Store",
+                options=available_stores,
+                key="delay_store"
+            )
+
+        with supplier_col2:
+
+            selected_product = st.selectbox(
+                "Select Product",
+                options=available_products,
+                key="delay_product"
+            )
+
+            selected_category = st.selectbox(
+                "Product Category",
+                options=available_categories,
+                key="delay_category"
+            )
+
+        # ------------------------------------------
+        # Numeric input defaults
+        # ------------------------------------------
+
+        supplier_records = supplier_reference[
+            supplier_reference["supplier_id"]
+            == selected_supplier
+        ]
+
+        supplier_reliability_default = float(
+            supplier_records["supplier_reliability"].median()
+        )
+
+        quantity_default = int(
+            supplier_reference["order_quantity"].median()
+        )
+
+        distance_default = float(
+            supplier_reference["distance_km"].median()
+        )
+
+        capacity_default = float(
+            supplier_reference["capacity_utilization"].median()
+        )
+
+        promised_days_default = int(
+            supplier_reference["promised_delivery_days"].median()
+        )
+
+        transport_risk_default = float(
+            supplier_reference["transport_risk"].median()
+        )
+
+        quantity_default = max(
+            1, min(10000, quantity_default)
+        )
+
+        distance_default = max(
+            1.0, min(2000.0, distance_default)
+        )
+
+        promised_days_default = max(
+            1, min(30, promised_days_default)
+        )
+
+        supplier_reliability_default = max(
+            0.0, min(1.0, supplier_reliability_default)
+        )
+
+        capacity_default = max(
+            0.0, min(1.0, capacity_default)
+        )
+
+        transport_risk_default = max(
+            0.0, min(1.0, transport_risk_default)
+        )
+
+        st.subheader("Order Information")
+
+        input_col1, input_col2, input_col3 = st.columns(3)
+
+        with input_col1:
+
+            order_quantity = st.number_input(
+                "Order Quantity",
+                min_value=1,
+                max_value=10000,
+                value=quantity_default,
+                step=10,
+                key="delay_order_quantity"
+            )
+
+            distance_km = st.number_input(
+                "Delivery Distance (KM)",
+                min_value=1.0,
+                max_value=2000.0,
+                value=round(distance_default, 2),
+                step=5.0,
+                key="delay_distance"
+            )
+
+            promised_delivery_days = st.number_input(
+                "Promised Delivery Days",
+                min_value=1,
+                max_value=30,
+                value=promised_days_default,
+                step=1,
+                key="delay_promised_days"
+            )
+
+        with input_col2:
+
+            supplier_reliability = st.slider(
+                "Supplier Reliability",
+                min_value=0.0,
+                max_value=1.0,
+                value=round(supplier_reliability_default, 3),
+                step=0.01,
+                help=(
+                    "A value closer to 1 indicates higher "
+                    "supplier reliability in the synthetic dataset."
+                ),
+                key="delay_reliability"
+            )
+
+            capacity_utilization = st.slider(
+                "Capacity Utilization",
+                min_value=0.0,
+                max_value=1.0,
+                value=round(capacity_default, 3),
+                step=0.01,
+                key="delay_capacity"
+            )
+
+        with input_col3:
+
+            transport_risk = st.slider(
+                "Transport Risk",
+                min_value=0.0,
+                max_value=1.0,
+                value=round(transport_risk_default, 3),
+                step=0.01,
+                key="delay_transport_risk"
+            )
+
+            is_festival_period = st.selectbox(
+                "Festival Period?",
+                options=["No", "Yes"],
+                key="delay_festival"
+            )
+
+        # ------------------------------------------
+        # Order date
+        # ------------------------------------------
+
+        st.subheader("Order Date")
+
+        order_date = st.date_input(
+            "Select Order Date",
+            value=date.today(),
+            key="delay_order_date"
+        )
+
+        st.caption(
+            "Day of week and month are automatically calculated "
+            "from the selected order date."
+        )
+
+        # ------------------------------------------
+        # Prediction
+        # ------------------------------------------
+
+        if st.button(
+            "Predict Supplier Delay",
+            type="primary",
+            key="predict_supplier_delay"
+        ):
+
+            prediction_input = pd.DataFrame([{
+
+                "supplier_id": selected_supplier,
+
+                "store_id": selected_store,
+
+                "product_id": selected_product,
+
+                "product_category": selected_category,
+
+                "order_quantity": int(order_quantity),
+
+                "distance_km": float(distance_km),
+
+                "supplier_reliability": float(
+                    supplier_reliability
+                ),
+
+                "capacity_utilization": float(
+                    capacity_utilization
+                ),
+
+                "promised_delivery_days": int(
+                    promised_delivery_days
+                ),
+
+                "order_day_of_week": int(
+                    order_date.weekday()
+                ),
+
+                "order_month": int(
+                    order_date.month
+                ),
+
+                "is_festival_period": int(
+                    is_festival_period == "Yes"
+                ),
+
+                "transport_risk": float(transport_risk)
+
+            }])
+
+            prediction_input = prediction_input[
+                SUPPLIER_DELAY_FEATURES
+            ]
+
+            delay_probability = float(
+                supplier_model.predict_proba(
+                    prediction_input
+                )[0][1]
+            )
+
+            predicted_class = int(
+                delay_probability >= 0.50
+            )
+
+            st.divider()
+
+            st.subheader("Supplier Delay Prediction Result")
+
+            result_col1, result_col2 = st.columns(2)
+
+            result_col1.metric(
+                "Estimated Delay Probability",
+                f"{delay_probability * 100:.2f}%"
+            )
+
+            if predicted_class == 1:
+
+                result_col2.metric(
+                    "Predicted Delivery Status",
+                    "Delayed"
+                )
+
+                st.error(
+                    "The experimental model predicts that "
+                    "this order may be delayed."
+                )
+
+            else:
+
+                result_col2.metric(
+                    "Predicted Delivery Status",
+                    "On Time"
+                )
+
+                st.success(
+                    "The experimental model predicts that "
+                    "this order may arrive on time."
+                )
+
+            st.progress(
+                min(
+                    max(delay_probability, 0.0),
+                    1.0
+                )
+            )
+
+            st.caption(
+                "The probability is the model's estimated score, "
+                "not a calibrated guarantee of actual delivery."
+            )
+
+            # --------------------------------------
+            # Display model inputs
+            # --------------------------------------
+
+            with st.expander(
+                "View all 13 model input features"
+            ):
+
+                st.dataframe(
+                    prediction_input,
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+            # --------------------------------------
+            # Download prediction
+            # --------------------------------------
+
+            prediction_download = prediction_input.copy()
+
+            prediction_download["order_date"] = (
+                order_date.strftime("%Y-%m-%d")
+            )
+
+            prediction_download["delay_probability"] = (
+                delay_probability
+            )
+
+            prediction_download["predicted_class"] = (
+                predicted_class
+            )
+
+            prediction_download["predicted_status"] = (
+                "Delayed"
+                if predicted_class == 1
+                else "On Time"
+            )
+
+            st.download_button(
+                label="Download Supplier Delay Prediction",
+                data=prediction_download.to_csv(index=False),
+                file_name="stockwise_supplier_delay_prediction.csv",
+                mime="text/csv",
+                key="supplier_delay_download"
+            )
+
+            st.success(
+                "Supplier delay prediction generated successfully!"
+            )
+
+        # ------------------------------------------
+        # Dataset information
+        # ------------------------------------------
+
+        with st.expander(
+            "About the Supplier Delay Model"
+        ):
+
+            st.write(
+                """
+                **Model:** Random Forest Classifier
+
+                **Dataset:** 50,000 synthetically generated grocery
+                supplier orders.
+
+                **Suppliers:** 30
+
+                **Stores:** 20
+
+                **Products:** 200
+
+                **Prediction threshold:** 0.50
+
+                **Final test accuracy:** 47.83%
+
+                **Final test precision:** 29.80%
+
+                **Final test recall:** 66.91%
+
+                **Final test F1 score:** 41.24%
+
+                **Final test ROC AUC:** 56.11%
+
+                This model is an experimental portfolio demonstration.
+                Its performance is limited and it is not suitable for
+                operational supplier decisions.
+                """
+            )
+
+    except Exception as error:
+
+        st.error(
+            "Unable to run Supplier Delay Prediction. "
+            f"Details: {error}"
+        )
+
+else:
+
+    st.warning(
+        "Supplier delay files are missing. Please check that "
+        "the V3 dataset and trained model exist."
+    )
+
+
+# ==================================================
+# 20. FOOTER
 # ==================================================
 
 st.divider()
@@ -1247,3 +2284,8 @@ st.divider()
 st.caption(
     "StockWise AI | Intelligent Grocery Inventory Management"
 )
+
+
+
+
+
