@@ -1,0 +1,27 @@
+STOCKWISE AI - WHAT-IF VALIDATION REPORT
+=======================================================
+
+Required inventory columns exist: PASS
+No missing inventory values: PASS
+Demand values are non-negative: PASS
+Target inventory is non-negative: PASS
+Estimated inventory is non-negative: PASS
+Estimated surplus is non-negative: PASS
+Estimated shortage is non-negative: PASS
+Surplus and shortage are not both positive: PASS
+Surplus calculation is correct: PASS
+Shortage calculation is correct: PASS
+Inventory status is correct: PASS
+Required transfer columns exist: PASS
+No missing transfer values: PASS
+No self-transfers: PASS
+All transfer quantities are positive: PASS
+No duplicate recommendations: PASS
+Donor transfers do not exceed estimated surplus: PASS
+Receiver transfers do not exceed estimated shortage: PASS
+
+Total checks: 18
+Passed: 18
+Failed: 0
+
+OVERALL VALIDATION: PASSED

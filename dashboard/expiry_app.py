@@ -1,5 +1,8 @@
 
 
+
+
+
 import streamlit as st
 import pandas as pd
 import easyocr
@@ -32,13 +35,13 @@ from src.expiry.database import (
 # ==================================================
 
 st.set_page_config(
-    page_title="StockWise AI - Expiry Management",
+    page_title="StockWise AI - Inventory Management",
     page_icon="📦",
     layout="wide"
 )
 
 st.title("📦 StockWise AI")
-st.subheader("Intelligent Expiry Management System")
+st.subheader("Intelligent Grocery Inventory Management System")
 
 
 # ==================================================
@@ -109,13 +112,11 @@ def load_ocr_reader():
 
 def extract_dates(ocr_results):
 
-    # Supported date formats
     date_patterns = [
         r"\b\d{4}[./-]\d{1,2}[./-]\d{1,2}\b",
         r"\b\d{1,2}[./-]\d{1,2}[./-]\d{4}\b"
     ]
 
-    # Expiry keywords
     expiry_keywords = [
         "EXPIRY",
         "EXPIRES",
@@ -125,7 +126,6 @@ def extract_dates(ocr_results):
         "BBE"
     ]
 
-    # Manufacturing keywords
     manufacturing_keywords = [
         "MFG",
         "MFD",
@@ -138,12 +138,9 @@ def extract_dates(ocr_results):
     ]
 
     candidates = []
-
     expiry_boxes = []
-
     manufacturing_boxes = []
 
-    # Supported Python date formats
     formats = [
         "%Y-%m-%d",
         "%Y/%m/%d",
@@ -152,10 +149,6 @@ def extract_dates(ocr_results):
         "%d/%m/%Y",
         "%d.%m.%Y"
     ]
-
-    # ------------------------------------------------
-    # READ OCR TEXT AND KEYWORD LOCATIONS
-    # ------------------------------------------------
 
     for result in ocr_results:
 
@@ -176,7 +169,6 @@ def extract_dates(ocr_results):
             center_y
         )
 
-        # Detect expiry keywords
         for keyword in expiry_keywords:
 
             pattern = (
@@ -188,10 +180,8 @@ def extract_dates(ocr_results):
             if re.search(pattern, text_upper):
 
                 expiry_boxes.append(position)
-
                 break
 
-        # Detect manufacturing keywords
         for keyword in manufacturing_keywords:
 
             pattern = (
@@ -203,12 +193,7 @@ def extract_dates(ocr_results):
             if re.search(pattern, text_upper):
 
                 manufacturing_boxes.append(position)
-
                 break
-
-        # ------------------------------------------------
-        # EXTRACT DATE CANDIDATES
-        # ------------------------------------------------
 
         for pattern in date_patterns:
 
@@ -238,26 +223,16 @@ def extract_dates(ocr_results):
                 if parsed_date:
 
                     candidates.append({
-
                         "date": parsed_date,
-
                         "position": position,
-
                         "confidence": float(confidence),
-
                         "score": 0
-
                     })
-
-    # ------------------------------------------------
-    # SCORE DATE CANDIDATES
-    # ------------------------------------------------
 
     for candidate in candidates:
 
         x1, y1 = candidate["position"]
 
-        # Positive scoring for expiry keywords
         for x2, y2 in expiry_boxes:
 
             distance = math.sqrt(
@@ -266,14 +241,11 @@ def extract_dates(ocr_results):
             )
 
             if distance < 250:
-
                 candidate["score"] += 10
 
             elif distance < 450:
-
                 candidate["score"] += 3
 
-        # Negative scoring for manufacturing keywords
         for x2, y2 in manufacturing_boxes:
 
             distance = math.sqrt(
@@ -282,16 +254,10 @@ def extract_dates(ocr_results):
             )
 
             if distance < 250:
-
                 candidate["score"] -= 15
 
             elif distance < 450:
-
                 candidate["score"] -= 5
-
-    # ------------------------------------------------
-    # REMOVE DUPLICATE DATES
-    # ------------------------------------------------
 
     unique_candidates = {}
 
@@ -307,13 +273,8 @@ def extract_dates(ocr_results):
 
             unique_candidates[current_date] = candidate
 
-    # ------------------------------------------------
-    # RANK DATE CANDIDATES
-    # ------------------------------------------------
-
     ranked_candidates = sorted(
         unique_candidates.values(),
-
         key=lambda item: (
             -item["score"],
             -item["confidence"]
@@ -362,12 +323,7 @@ if uploaded_file:
             )
 
             st.session_state.ocr_candidates = ranked_dates
-
             st.session_state.last_scan = image_token
-
-    # ------------------------------------------------
-    # DISPLAY DETECTED DATES
-    # ------------------------------------------------
 
     if st.session_state.ocr_candidates:
 
@@ -392,12 +348,10 @@ if uploaded_file:
 
         selected_date = st.selectbox(
             "Select the correct expiry date",
-
             options=[
                 candidate["date"]
                 for candidate in st.session_state.ocr_candidates
             ],
-
             format_func=lambda x: x.strftime("%Y-%m-%d")
         )
 
@@ -497,26 +451,16 @@ if products:
         inventory.append({
 
             "ID": product["id"],
-
             "Product": product["product_name"],
-
             "Batch Number": product["batch_number"],
-
             "Quantity": product["quantity"],
-
             "Expiry Date": product["expiry_date"],
-
             "Days Remaining": days,
-
             "Status": status
 
         })
 
     df = pd.DataFrame(inventory)
-
-    # ------------------------------------------------
-    # SUMMARY METRICS
-    # ------------------------------------------------
 
     expired_count = (
         df["Status"] == "Expired"
@@ -547,10 +491,6 @@ if products:
         int(safe_count)
     )
 
-    # ------------------------------------------------
-    # PRODUCT INVENTORY
-    # ------------------------------------------------
-
     st.subheader("Product Inventory")
 
     st.dataframe(
@@ -558,10 +498,6 @@ if products:
         use_container_width=True,
         hide_index=True
     )
-
-    # ------------------------------------------------
-    # EXPIRY ALERTS
-    # ------------------------------------------------
 
     st.subheader("4. Expiry Alerts")
 
@@ -582,10 +518,6 @@ if products:
         st.success(
             "No expiry alerts!"
         )
-
-    # ------------------------------------------------
-    # DELETE PRODUCT
-    # ------------------------------------------------
 
     st.subheader("5. Delete Product")
 
@@ -625,7 +557,689 @@ else:
 
 
 # ==================================================
-# 11. FOOTER
+# 11. INTER-STORE STOCK TRANSFER OPTIMIZATION
+# ==================================================
+
+st.header("6. Inter-Store Stock Transfer Optimization")
+
+TRANSFER_INVENTORY_PATH = (
+    PROJECT_ROOT
+    / "data"
+    / "processed"
+    / "stock_transfer"
+    / "store_product_inventory_simulated.csv"
+)
+
+TRANSFER_RECOMMENDATIONS_PATH = (
+    PROJECT_ROOT
+    / "reports"
+    / "stock_transfer"
+    / "transfer_recommendations.csv"
+)
+
+if (
+    TRANSFER_INVENTORY_PATH.exists()
+    and TRANSFER_RECOMMENDATIONS_PATH.exists()
+):
+
+    try:
+
+        transfer_inventory = pd.read_csv(
+            TRANSFER_INVENTORY_PATH
+        )
+
+        transfer_recommendations = pd.read_csv(
+            TRANSFER_RECOMMENDATIONS_PATH
+        )
+
+        st.warning(
+            "Inventory quantities are estimated using historical "
+            "sales and product availability data. Actual physical "
+            "stock counts are not available in the source dataset."
+        )
+
+        total_recommendations = len(
+            transfer_recommendations
+        )
+
+        total_estimated_units = int(
+            transfer_recommendations[
+                "transfer_quantity_simulated_units"
+            ].sum()
+        ) if total_recommendations else 0
+
+        unique_products = (
+            transfer_recommendations["product_id"].nunique()
+            if total_recommendations else 0
+        )
+
+        unique_store_pairs = (
+            transfer_recommendations[
+                ["donor_store_id", "receiver_store_id"]
+            ].drop_duplicates().shape[0]
+            if total_recommendations else 0
+        )
+
+        transfer_col1, transfer_col2, transfer_col3, transfer_col4 = (
+            st.columns(4)
+        )
+
+        transfer_col1.metric(
+            "Recommendations",
+            total_recommendations
+        )
+
+        transfer_col2.metric(
+            "Estimated Transfer Units",
+            total_estimated_units
+        )
+
+        transfer_col3.metric(
+            "Products",
+            unique_products
+        )
+
+        transfer_col4.metric(
+            "Store Pairs",
+            unique_store_pairs
+        )
+
+        st.subheader("Recommended Stock Transfers")
+
+        if not transfer_recommendations.empty:
+
+            display_recommendations = (
+                transfer_recommendations.rename(
+                    columns={
+                        "product_id": "Product ID",
+                        "donor_store_id": "Donor Store",
+                        "receiver_store_id": "Receiver Store",
+                        "transfer_quantity_simulated_units":
+                            "Suggested Transfer Quantity",
+                        "donor_availability_hours":
+                            "Donor Availability Hours",
+                        "receiver_availability_hours":
+                            "Receiver Availability Hours",
+                        "donor_simulated_inventory":
+                            "Donor Estimated Inventory",
+                        "receiver_simulated_inventory":
+                            "Receiver Estimated Inventory",
+                        "receiver_estimated_daily_demand":
+                            "Receiver Estimated Daily Demand",
+                        "recommendation_basis":
+                            "Recommendation Basis",
+                    }
+                )
+            )
+
+            st.dataframe(
+                display_recommendations,
+                use_container_width=True,
+                hide_index=True
+            )
+
+            recommendation_csv = (
+                transfer_recommendations.to_csv(index=False)
+            )
+
+            st.download_button(
+                label="Download Transfer Recommendations",
+                data=recommendation_csv,
+                file_name="stockwise_transfer_recommendations.csv",
+                mime="text/csv"
+            )
+
+        else:
+
+            st.info(
+                "No transfer recommendations are currently available."
+            )
+
+        st.subheader("Store-Product Inventory Overview")
+
+        inventory_columns = [
+            "store_id",
+            "product_id",
+            "average_daily_sales",
+            "average_availability_hours",
+            "estimated_daily_demand_units",
+            "simulated_inventory_units",
+            "target_inventory_units",
+            "simulated_surplus_units",
+            "simulated_shortage_units",
+        ]
+
+        available_inventory_columns = [
+            column
+            for column in inventory_columns
+            if column in transfer_inventory.columns
+        ]
+
+        display_inventory = transfer_inventory[
+            available_inventory_columns
+        ].rename(
+            columns={
+                "store_id": "Store ID",
+                "product_id": "Product ID",
+                "average_daily_sales": "Average Daily Sales",
+                "average_availability_hours":
+                    "Average Availability Hours",
+                "estimated_daily_demand_units":
+                    "Estimated Daily Demand",
+                "simulated_inventory_units":
+                    "Estimated Inventory",
+                "target_inventory_units":
+                    "Target Inventory",
+                "simulated_surplus_units":
+                    "Estimated Surplus",
+                "simulated_shortage_units":
+                    "Estimated Shortage",
+            }
+        )
+
+        st.dataframe(
+            display_inventory,
+            use_container_width=True,
+            hide_index=True
+        )
+
+        inventory_csv = transfer_inventory.to_csv(index=False)
+
+        st.download_button(
+            label="Download Inventory Data",
+            data=inventory_csv,
+            file_name="stockwise_inventory_data.csv",
+            mime="text/csv"
+        )
+
+    except Exception as error:
+
+        st.error(
+            "Unable to load the stock transfer data. "
+            f"Details: {error}"
+        )
+
+else:
+
+    st.info(
+        "Stock transfer files were not found. Run the transfer "
+        "generation script first: "
+        "python src/stock_transfer/generate_transfer_candidates.py"
+    )
+
+
+# ==================================================
+# 12. WHAT-IF ANALYSIS ENGINE
+# ==================================================
+
+def calculate_what_if_scenario(
+    source_inventory,
+    demand_change_percent,
+    target_cover_days
+):
+
+    scenario = source_inventory.copy()
+
+    demand_multiplier = (
+        1 + demand_change_percent / 100
+    )
+
+    scenario["scenario_daily_demand"] = (
+        scenario["estimated_daily_demand_units"]
+        * demand_multiplier
+    )
+
+    scenario["scenario_target_inventory"] = np.ceil(
+        scenario["scenario_daily_demand"]
+        * target_cover_days
+    )
+
+    scenario["estimated_inventory"] = (
+        scenario["simulated_inventory_units"]
+    )
+
+    scenario["estimated_surplus"] = (
+        scenario["estimated_inventory"]
+        - scenario["scenario_target_inventory"]
+    ).clip(lower=0)
+
+    scenario["estimated_shortage"] = (
+        scenario["scenario_target_inventory"]
+        - scenario["estimated_inventory"]
+    ).clip(lower=0)
+
+    scenario["inventory_status"] = "Balanced"
+
+    scenario.loc[
+        scenario["estimated_surplus"] > 0,
+        "inventory_status"
+    ] = "Surplus"
+
+    scenario.loc[
+        scenario["estimated_shortage"] > 0,
+        "inventory_status"
+    ] = "Shortage"
+
+    return scenario
+
+
+# ==================================================
+# 13. WHAT-IF TRANSFER GENERATION
+# ==================================================
+
+def generate_what_if_transfers(scenario):
+
+    recommendations = []
+
+    for product_id, group in scenario.groupby("product_id"):
+
+        donors = group[
+            (group["average_availability_hours"] >= 4)
+            & (group["estimated_surplus"] > 0)
+        ].copy()
+
+        receivers = group[
+            (group["average_availability_hours"] <= 6)
+            & (group["estimated_shortage"] > 0)
+            & (group["scenario_daily_demand"] > 0)
+        ].copy()
+
+        donors = donors.sort_values(
+            by=[
+                "estimated_surplus",
+                "average_availability_hours"
+            ],
+            ascending=[False, False]
+        )
+
+        receivers = receivers.sort_values(
+            by=[
+                "average_availability_hours",
+                "estimated_shortage"
+            ],
+            ascending=[True, False]
+        )
+
+        donor_remaining = {
+            index: int(row["estimated_surplus"])
+            for index, row in donors.iterrows()
+        }
+
+        receiver_remaining = {
+            index: int(row["estimated_shortage"])
+            for index, row in receivers.iterrows()
+        }
+
+        for receiver_index, receiver in receivers.iterrows():
+
+            for donor_index, donor in donors.iterrows():
+
+                if receiver_remaining[receiver_index] <= 0:
+                    break
+
+                if donor_remaining[donor_index] <= 0:
+                    continue
+
+                if donor["store_id"] == receiver["store_id"]:
+                    continue
+
+                transfer_quantity = min(
+                    donor_remaining[donor_index],
+                    receiver_remaining[receiver_index]
+                )
+
+                if transfer_quantity <= 0:
+                    continue
+
+                recommendations.append({
+
+                    "product_id": product_id,
+
+                    "donor_store_id": int(
+                        donor["store_id"]
+                    ),
+
+                    "receiver_store_id": int(
+                        receiver["store_id"]
+                    ),
+
+                    "recommended_transfer_quantity": int(
+                        transfer_quantity
+                    ),
+
+                    "donor_estimated_surplus": int(
+                        donor_remaining[donor_index]
+                    ),
+
+                    "receiver_estimated_shortage": int(
+                        receiver_remaining[receiver_index]
+                    ),
+
+                    "donor_availability_hours": round(
+                        float(
+                            donor["average_availability_hours"]
+                        ),
+                        2
+                    ),
+
+                    "receiver_availability_hours": round(
+                        float(
+                            receiver["average_availability_hours"]
+                        ),
+                        2
+                    )
+
+                })
+
+                donor_remaining[donor_index] -= transfer_quantity
+
+                receiver_remaining[receiver_index] -= transfer_quantity
+
+    return pd.DataFrame(recommendations)
+
+
+# ==================================================
+# 14. INTERACTIVE WHAT-IF DASHBOARD
+# ==================================================
+
+st.header("7. What-if Analysis")
+
+st.write(
+    "Explore how changes in product demand and target stock "
+    "coverage affect estimated inventory shortages, surplus "
+    "and inter-store transfer recommendations."
+)
+
+WHAT_IF_INVENTORY_PATH = (
+    PROJECT_ROOT
+    / "data"
+    / "processed"
+    / "stock_transfer"
+    / "store_product_inventory_simulated.csv"
+)
+
+if WHAT_IF_INVENTORY_PATH.exists():
+
+    try:
+
+        what_if_source = pd.read_csv(
+            WHAT_IF_INVENTORY_PATH
+        )
+
+        st.warning(
+            "What-if results use estimated inventory quantities. "
+            "The original dataset does not contain actual physical "
+            "stock counts. Scenario results are analytical estimates."
+        )
+
+        st.subheader("Scenario Settings")
+
+        setting_col1, setting_col2 = st.columns(2)
+
+        with setting_col1:
+
+            demand_change = st.slider(
+                "Demand Change (%)",
+                min_value=-50,
+                max_value=100,
+                value=0,
+                step=5,
+                help="Change expected product demand."
+            )
+
+        with setting_col2:
+
+            target_cover_days = st.slider(
+                "Target Stock Coverage (Days)",
+                min_value=1,
+                max_value=7,
+                value=2,
+                step=1,
+                help="Number of days of demand the store should hold."
+            )
+
+        st.caption(
+            f"Scenario: Demand {demand_change:+d}% | "
+            f"Target coverage: {target_cover_days} days"
+        )
+
+        # Calculate scenario
+
+        what_if_results = calculate_what_if_scenario(
+            what_if_source,
+            demand_change,
+            target_cover_days
+        )
+
+        what_if_transfers = generate_what_if_transfers(
+            what_if_results
+        )
+
+        # Summary metrics
+
+        shortage_count = int(
+            (
+                what_if_results["inventory_status"]
+                == "Shortage"
+            ).sum()
+        )
+
+        surplus_count = int(
+            (
+                what_if_results["inventory_status"]
+                == "Surplus"
+            ).sum()
+        )
+
+        balanced_count = int(
+            (
+                what_if_results["inventory_status"]
+                == "Balanced"
+            ).sum()
+        )
+
+        total_shortage = int(
+            what_if_results["estimated_shortage"].sum()
+        )
+
+        total_surplus = int(
+            what_if_results["estimated_surplus"].sum()
+        )
+
+        transfer_count = len(what_if_transfers)
+
+        total_transfer_units = (
+            int(
+                what_if_transfers[
+                    "recommended_transfer_quantity"
+                ].sum()
+            )
+            if transfer_count > 0
+            else 0
+        )
+
+        st.subheader("Scenario Results")
+
+        metric1, metric2, metric3 = st.columns(3)
+
+        metric1.metric(
+            "Products with Shortage",
+            shortage_count
+        )
+
+        metric2.metric(
+            "Products with Surplus",
+            surplus_count
+        )
+
+        metric3.metric(
+            "Balanced Records",
+            balanced_count
+        )
+
+        metric4, metric5, metric6 = st.columns(3)
+
+        metric4.metric(
+            "Estimated Shortage Units",
+            f"{total_shortage:,}"
+        )
+
+        metric5.metric(
+            "Estimated Surplus Units",
+            f"{total_surplus:,}"
+        )
+
+        metric6.metric(
+            "Recommended Transfer Units",
+            f"{total_transfer_units:,}"
+        )
+
+        st.metric(
+            "Transfer Recommendations",
+            transfer_count
+        )
+
+        # Transfer recommendations
+
+        st.subheader("Scenario Transfer Recommendations")
+
+        if not what_if_transfers.empty:
+
+            st.dataframe(
+                what_if_transfers,
+                use_container_width=True,
+                hide_index=True
+            )
+
+            transfer_download = (
+                what_if_transfers.to_csv(index=False)
+            )
+
+            st.download_button(
+                label="Download Scenario Transfer Recommendations",
+                data=transfer_download,
+                file_name="stockwise_what_if_transfers.csv",
+                mime="text/csv",
+                key="what_if_transfer_download"
+            )
+
+        else:
+
+            st.info(
+                "No transfer recommendations were generated "
+                "for this scenario."
+            )
+
+        # Inventory scenario details
+
+        st.subheader("Store-Product Scenario Details")
+
+        scenario_columns = [
+            "store_id",
+            "product_id",
+            "scenario_daily_demand",
+            "scenario_target_inventory",
+            "estimated_inventory",
+            "estimated_surplus",
+            "estimated_shortage",
+            "inventory_status"
+        ]
+
+        scenario_display = what_if_results[
+            scenario_columns
+        ].rename(
+            columns={
+                "store_id": "Store ID",
+                "product_id": "Product ID",
+                "scenario_daily_demand":
+                    "Scenario Daily Demand",
+                "scenario_target_inventory":
+                    "Scenario Target Inventory",
+                "estimated_inventory":
+                    "Estimated Inventory",
+                "estimated_surplus":
+                    "Estimated Surplus",
+                "estimated_shortage":
+                    "Estimated Shortage",
+                "inventory_status":
+                    "Inventory Status"
+            }
+        )
+
+        st.dataframe(
+            scenario_display,
+            use_container_width=True,
+            hide_index=True
+        )
+
+        scenario_download = (
+            what_if_results.to_csv(index=False)
+        )
+
+        st.download_button(
+            label="Download What-if Scenario Results",
+            data=scenario_download,
+            file_name="stockwise_what_if_inventory.csv",
+            mime="text/csv",
+            key="what_if_inventory_download"
+        )
+
+        # Scenario summary
+
+        st.subheader("Scenario Summary")
+
+        summary = pd.DataFrame([{
+
+            "demand_change_percent": demand_change,
+
+            "target_cover_days": target_cover_days,
+
+            "total_store_product_records": len(
+                what_if_results
+            ),
+
+            "stores_products_with_shortage": shortage_count,
+
+            "stores_products_with_surplus": surplus_count,
+
+            "stores_products_balanced": balanced_count,
+
+            "total_estimated_shortage_units": total_shortage,
+
+            "total_estimated_surplus_units": total_surplus,
+
+            "transfer_recommendations": transfer_count,
+
+            "total_recommended_transfer_units": total_transfer_units
+
+        }])
+
+        st.dataframe(
+            summary,
+            use_container_width=True,
+            hide_index=True
+        )
+
+        st.success(
+            "What-if scenario calculated successfully!"
+        )
+
+    except Exception as error:
+
+        st.error(
+            f"Unable to run What-if Analysis: {error}"
+        )
+
+else:
+
+    st.info(
+        "What-if input inventory file was not found. "
+        "Run the stock transfer generation script first."
+    )
+
+
+# ==================================================
+# 15. FOOTER
 # ==================================================
 
 st.divider()

@@ -1,0 +1,5 @@
+product_id,donor_store_id,receiver_store_id,transfer_quantity_simulated_units,donor_availability_hours,receiver_availability_hours,donor_simulated_inventory,receiver_simulated_inventory,receiver_estimated_daily_demand,recommendation_basis
+74,434,305,6,4.73,4.66,17,6,5.71,Real sales and availability indicators + simulated inventory
+291,668,678,1,4.95,3.36,17,19,9.96,Real sales and availability indicators + simulated inventory
+740,0,157,1,4.22,3.74,16,10,8.11,Real sales and availability indicators + simulated inventory
+834,0,157,15,9.0,5.3,61,17,15.8,Real sales and availability indicators + simulated inventory

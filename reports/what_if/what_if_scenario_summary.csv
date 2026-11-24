@@ -1,0 +1,2 @@
+demand_change_percent,target_cover_days,total_store_product_records,stores_products_with_shortage,stores_products_with_surplus,stores_products_balanced,total_estimated_shortage_units,total_estimated_surplus_units,transfer_recommendations,total_recommended_transfer_units
+0,3,216,114,92,10,1487,873,5,43
