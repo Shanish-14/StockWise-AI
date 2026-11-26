@@ -1,4 +1,5 @@
 
+
 import sqlite3
 from pathlib import Path
 
@@ -20,8 +21,10 @@ def get_connection():
 
 
 def init_db():
-    """Create the products table if it does not exist."""
+    """Create the products table and safely add missing columns."""
     with get_connection() as connection:
+
+        # Create the table if it does not exist
         connection.execute("""
             CREATE TABLE IF NOT EXISTS products (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -33,8 +36,37 @@ def init_db():
             )
         """)
 
+        # Check which columns already exist
+        existing_columns = {
+            column["name"]
+            for column in connection.execute(
+                "PRAGMA table_info(products)"
+            ).fetchall()
+        }
 
-def add_product(product_name, batch_number, quantity, expiry_date):
+        # Add new columns without deleting existing records
+        new_columns = {
+            "sku": "TEXT",
+            "category": "TEXT",
+            "store": "TEXT"
+        }
+
+        for column_name, column_type in new_columns.items():
+            if column_name not in existing_columns:
+                connection.execute(
+                    f"ALTER TABLE products ADD COLUMN {column_name} {column_type}"
+                )
+
+
+def add_product(
+    product_name,
+    batch_number,
+    quantity,
+    expiry_date,
+    sku="",
+    category="Other",
+    store="Downtown Flagship #01"
+):
     """Save a new product in the database."""
     with get_connection() as connection:
         connection.execute("""
@@ -42,14 +74,20 @@ def add_product(product_name, batch_number, quantity, expiry_date):
                 product_name,
                 batch_number,
                 quantity,
-                expiry_date
+                expiry_date,
+                sku,
+                category,
+                store
             )
-            VALUES (?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (
             product_name,
             batch_number,
             quantity,
-            expiry_date
+            expiry_date,
+            sku,
+            category,
+            store
         ))
 
 
@@ -74,5 +112,5 @@ def delete_product(product_id):
         )
 
 
-# Create the database and table when this module is imported
+# Create or upgrade the database when this module is imported
 init_db()

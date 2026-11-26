@@ -1,4 +1,5 @@
 
+
 import re
 import math
 from datetime import datetime
@@ -7,8 +8,8 @@ from datetime import datetime
 def extract_dates(ocr_results):
 
     date_patterns = [
-        r"\b\d{4}[./-]\d{1,2}[./-]\d{1,2}\b",
-        r"\b\d{1,2}[./-]\d{1,2}[./-]\d{4}\b"
+        r"\b\d{4}[./_-]\d{1,2}[./_-]\d{1,2}\b",
+        r"\b\d{1,2}[./_-]\d{1,2}[./_-]\d{4}\b"
     ]
 
     expiry_keywords = [
@@ -35,6 +36,7 @@ def extract_dates(ocr_results):
 
         text_upper = text.upper()
 
+        # Detect expiry and manufacturing keywords
         center_x = sum(p[0] for p in bbox) / 4
         center_y = sum(p[1] for p in bbox) / 4
 
@@ -62,9 +64,22 @@ def extract_dates(ocr_results):
                 manufacturing_boxes.append(position)
                 break
 
+        # Fix OCR spacing and underscore mistakes
+        normalized_text = re.sub(
+            r"(?<=\d)\s*[_]\s*(?=\d)",
+            "-",
+            text
+        )
+
+        normalized_text = re.sub(
+            r"(?<=\d)\s*([./-])\s*(?=\d)",
+            r"\1",
+            normalized_text
+        )
+
         for pattern in date_patterns:
 
-            for item in re.findall(pattern, text):
+            for item in re.findall(pattern, normalized_text):
 
                 parsed_date = None
 
@@ -85,6 +100,7 @@ def extract_dates(ocr_results):
                         "score": 0
                     })
 
+    # Rank dates based on nearby keywords
     for candidate in candidates:
 
         x1, y1 = candidate["position"]
@@ -111,6 +127,7 @@ def extract_dates(ocr_results):
             elif distance < 450:
                 candidate["score"] -= 5
 
+    # Remove duplicate dates
     unique_candidates = {}
 
     for candidate in candidates:
